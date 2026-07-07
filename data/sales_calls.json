@@ -1,0 +1,82 @@
+[
+  {
+    "id": "call_001",
+    "customer": "Nordwind Logistics",
+    "date": "2026-02-14",
+    "deal_stage": "closed_won",
+    "arr": 48000,
+    "text": "Call notes: Nordwind Logistics evaluated our platform against two competitors over six weeks. Their VP of Ops, Lena Faust, said the deciding factor was our API's ability to sync inventory data in near real time across their 12 warehouses. They were previously using a spreadsheet-based process that caused stockouts roughly twice a month. Pricing was agreed at 48k ARR annual, paid quarterly. Implementation kickoff scheduled for March 3rd. Lena flagged that their IT security team will require a SOC 2 report before granting production API access."
+  },
+  {
+    "id": "call_002",
+    "customer": "Nordwind Logistics",
+    "date": "2026-03-20",
+    "deal_stage": "closed_won",
+    "arr": 48000,
+    "text": "Follow-up implementation call. Nordwind's engineering lead, Tomas Beck, reported the initial API integration took longer than expected because their legacy ERP system used a non-standard date format. Workaround was implemented on our side. Tomas asked whether we support webhook retries with exponential backoff, since their network occasionally drops packets during nightly batch jobs. We confirmed this is supported and sent documentation."
+  },
+  {
+    "id": "call_003",
+    "customer": "Halberg Retail Group",
+    "date": "2026-01-09",
+    "deal_stage": "churned",
+    "arr": 0,
+    "text": "Exit interview with Halberg Retail Group after they churned. Their procurement manager, Ines Vogel, said the main reason was cost relative to a competitor offering a similar feature set at 30% lower price. She also mentioned our onboarding took too long -- three months versus the one month they were promised. She said the product itself worked well once it was set up, particularly the reporting dashboards, but the friction during rollout eroded internal confidence in the purchase."
+  },
+  {
+    "id": "call_004",
+    "customer": "Halberg Retail Group",
+    "date": "2025-10-02",
+    "deal_stage": "closed_lost_then_won",
+    "arr": 22000,
+    "text": "Initial sales call with Halberg Retail Group. They were comparing us against Competitor X and Competitor Y. Their main concern was whether our platform could handle their scale of roughly 40,000 SKUs across 15 stores. We walked through the architecture and shared a case study from a similarly sized retailer. They asked for a 30-day pilot before committing."
+  },
+  {
+    "id": "call_005",
+    "customer": "Birkenstadt Manufacturing",
+    "date": "2026-04-11",
+    "deal_stage": "in_negotiation",
+    "arr": 65000,
+    "text": "Negotiation call with Birkenstadt Manufacturing. Their CFO, Rolf Ahlgren, pushed back on the proposed 65k ARR, requesting a 15% discount in exchange for a 3-year contract instead of annual. He also asked about our roadmap for predictive maintenance features, since that's their long-term interest even though the current deal is for inventory management only. Sales rep committed to following up with a roadmap doc by end of week."
+  },
+  {
+    "id": "call_006",
+    "customer": "Birkenstadt Manufacturing",
+    "date": "2026-04-25",
+    "deal_stage": "in_negotiation",
+    "arr": 65000,
+    "text": "Second negotiation call. Rolf accepted a 10% discount in exchange for a 2-year term instead of the requested 3-year. Legal review of the contract is now the blocker; Birkenstadt's legal team wants a data processing addendum compliant with German data protection law (BDSG) in addition to standard GDPR terms. Our legal team to draft this by next week."
+  },
+  {
+    "id": "call_007",
+    "customer": "Solaris Energy Partners",
+    "date": "2026-05-30",
+    "deal_stage": "prospecting",
+    "arr": 0,
+    "text": "Discovery call with Solaris Energy Partners. They are currently using a competitor tool but are unhappy with its lack of hybrid search over their technical documentation -- their support team says keyword search alone misses a lot of relevant results because customers phrase issues differently than the docs are written. This is a strong fit for our platform's semantic search capability. Next step: technical demo scheduled for June 10th with their Head of Customer Support, Anja Reiter."
+  },
+  {
+    "id": "call_008",
+    "customer": "Solaris Energy Partners",
+    "date": "2026-06-10",
+    "deal_stage": "prospecting",
+    "arr": 0,
+    "text": "Technical demo call. Anja Reiter and two engineers attended. They were impressed by the retrieval quality on ambiguous queries but asked pointed questions about data residency, since their customer data must stay within the EU. We confirmed our EU-hosted deployment option. They also asked whether pricing scales with number of documents indexed or number of queries; we clarified it's based on monthly active queries."
+  },
+  {
+    "id": "call_009",
+    "customer": "Ferra Steel Works",
+    "date": "2026-03-02",
+    "deal_stage": "closed_lost",
+    "arr": 0,
+    "text": "Final call before Ferra Steel Works decided not to proceed. Their reason was primarily budget freeze due to a company-wide restructuring announced the week prior. Procurement contact, Hannes Bruck, said they would likely revisit in Q1 of next year once budgets are reset. He asked to be kept on our newsletter and expressed continued interest in the product itself."
+  },
+  {
+    "id": "call_010",
+    "customer": "Vindra Cosmetics",
+    "date": "2026-05-15",
+    "deal_stage": "closed_won",
+    "arr": 31000,
+    "text": "Closing call with Vindra Cosmetics. Marketing Ops lead, Petra Lindqvist, confirmed sign-off at 31k ARR. She specifically valued our structured retrieval feature that lets her team filter product documentation by region and regulatory status, since cosmetics regulations differ across the EU, US, and UK markets. Kickoff call scheduled for June 1st."
+  }
+]
