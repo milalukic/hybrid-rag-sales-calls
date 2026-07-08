@@ -10,6 +10,12 @@
 ## Setup
 
 ```bash
+cd path/to/rag_project
+
+# Recommended - virtual environment
+python3 -m venv venv
+source venv/bin/activate 
+
 pip install -r requirements.txt
 export ANTHROPIC_API_KEY=your_key_here   # optional; omit to use offline fallback
 ```
