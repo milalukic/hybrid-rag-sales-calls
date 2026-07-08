@@ -22,8 +22,8 @@ def main():
     # Step 2: build the search index and retrieve relevant chunks (retrieval.py)
     index = SimpleIndex(chunks)
     retrieved = index.search(question, top_k=3)
-
     print(f"\nRetrieved {len(retrieved)} chunks:")
+    
     for r in retrieved:
         print(f"  [{r['score']:.4f}] {r['doc_id']} -- {r['text'][:80]}...")
 
