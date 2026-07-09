@@ -23,5 +23,8 @@ export ANTHROPIC_API_KEY=your_key_here   # optional; omit to use offline fallbac
 ## Usage
 
 ```bash
-python main.py "why did halberg retail group churn?"
+python3 main.py "why did halberg retail group churn?"
+python3 main.py "discount negotiation" --stage in_negotiation
+python3 main.py "onboarding issues" --customer Nordwind
+python3 main.py "pricing pushback" --stage in_negotiation --customer Birkenstadt --top_k 5
 ```
