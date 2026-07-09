@@ -2,7 +2,7 @@ import sys
 import json
 
 from chunking import chunk_documents
-from retrieval import SimpleIndex
+from retrieval import HybridIndex
 from generate import generate_answer
 
 
@@ -20,12 +20,13 @@ def main():
     chunks = chunk_documents(docs)
 
     # Step 2: build the search index and retrieve relevant chunks (retrieval.py)
-    index = SimpleIndex(chunks)
-    retrieved = index.search(question, top_k=3)
+    index = HybridIndex(chunks)
+    retrieved = index.hybrid_search(question, top_k=3)
     print(f"\nRetrieved {len(retrieved)} chunks:")
     
     for r in retrieved:
-        print(f"  [{r['score']:.4f}] {r['doc_id']} -- {r['text'][:80]}...")
+    	display_score = r.get("rerank_score", r["score"])
+	print(f"  [{display_score:.4f}] {r['doc_id']} -- {r['text'][:80]}...")
 
     # Step 3: generate an answer using only the retrieved chunks (generate.py)
     answer = generate_answer(question, retrieved)
