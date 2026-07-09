@@ -9,10 +9,8 @@ class HybridIndex:
 		"""
 		chunks: output of chunking.chunk_documents() -- a list of{"chunk_id", "doc_id", "text"} dicts.
 		"""
-		# Keep the original chunk records so that I can look up their text/doc_id later
-		self.chunks = chunks
 
-		# Pull out just the raw text of every chunk
+		self.chunks = chunks
 		self.texts = [c["text"] for c in chunks]
 
 		# sparse index (BM25) - good at direct word search 
@@ -27,7 +25,11 @@ class HybridIndex:
 		# re-ranking - structurally different from sentence transformer 
 		# takes query + chunk and combines them at input 
 		self.reranker = CrossEncoder(reranker_model)
-
+	
+	def _apply_filter(self, metadata_filter: Optional[Callable[[Dict], bool]]) -> List[int]:
+		if metadata_filter is None:
+			return list(range(len(self.chunks)))
+		return [i for i, c in enumerate(self.chunks) if metadata_filter(c["metadata"])]
         
 	def dense_search(self, query: str, indices: List[int], top_k: int) -> List[int]:
 		query_emb = self.model.encode([query], normalize_embeddings=True)[0]
@@ -51,12 +53,11 @@ class HybridIndex:
 		if not candidates:
 			return []
  
-        	# The CrossEncoder expects a list of (query, passage) PAIRSa nd returns one relevance score per pair in the same order. This is the "look at both texts together" step.
+        	# The CrossEncoder expects a list of (query, passage) PAIRSa nd returns one relevance score per pair in the same order.
 		pairs = [(query, c["text"]) for c in candidates]
 		rerank_scores = self.reranker.predict(pairs)
  
-        	# Attach each candidate's new cross-encoder score, then sort
-        	# descending (higher = more relevant) and keep only the final top_k.
+        	# Attach each candidate's new cross-encoder score, then sort descending (higher = more relevant) and keep only the final top_k.
 		for c, score in zip(candidates, rerank_scores):
 			c["rerank_score"] = float(score)
  
@@ -68,6 +69,7 @@ class HybridIndex:
 		self,
 		query: str,
 		top_k: int = 5,
+		metadata_filter: Optional[Callable[[Dict], bool]] = None,
 		rrf_k: int = 60,
 		candidate_pool: int = 20,
 		use_reranker: bool = True,
@@ -77,7 +79,7 @@ class HybridIndex:
 			the merged candidates with a cross-encoder for final precision.
 	       		"""
 	       		
-			indices = list(range(len(self.chunks)))
+			indices = self._apply_filter(metadata_filter)
 	
 			if not indices:
 				return []

@@ -16,6 +16,7 @@ def chunk_text(text: str, chunk_size: int = 120, overlap: int = 30) -> List[str]
 	if step <= 0:
 		raise ValueError("overlap cant be bigger than chunk size")
 
+	start = 0
 	while start < len(words):
 		end = start + chunk_size
 		
@@ -32,11 +33,12 @@ def chunk_text(text: str, chunk_size: int = 120, overlap: int = 30) -> List[str]
 	return chunks
 
 
-def chunk_documents(docs: List[Dict[str, Any]], chunk_size: int = 120) -> List[Dict[str, Any]]:
+def chunk_documents(docs: List[Dict[str, Any]], chunk_size: int = 120, overlap: int = 30) -> List[Dict[str, Any]]:
 	chunk_records = []
 
 	for doc in docs:
-		pieces = chunk_text(doc["text"], chunk_size=chunk_size)
+		metadata = {k: v for k, v in doc.items() if k not in ("text", "id")}
+		pieces = chunk_text(doc["text"], chunk_size=chunk_size, overlap = overlap)
 		for i, piece in enumerate(pieces):
 			chunk_records.append({
 			# e.g. "call_001_0" for the first chunk of document call_001
@@ -44,6 +46,7 @@ def chunk_documents(docs: List[Dict[str, Any]], chunk_size: int = 120) -> List[D
 			# Keep track of the original document, so if I retrieve this chunk later, I know which source it came from.
 			"doc_id": doc["id"],
 			"text": piece,
+			"metadata": metadata
 			})
 
 	return chunk_records
