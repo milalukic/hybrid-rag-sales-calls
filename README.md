@@ -63,3 +63,56 @@ python3 main.py "discount negotiation" --stage in_negotiation
 python3 main.py "onboarding issues" --customer Nordwind
 python3 main.py "pricing pushback" --stage in_negotiation --customer Birkenstadt --top_k 5
 ```
+
+## API (FastAPI)
+
+[#api-fastapi](#api-fastapi)
+
+Wraps the same pipeline (`chunk_documents`, `HybridIndex.hybrid_search`, `generate_answer`) behind a single endpoint. The index is built once at startup via a FastAPI lifespan event, not per-request.
+
+### Setup
+
+```
+pip install fastapi uvicorn
+```
+
+(add `fastapi` and `uvicorn` to `requirements.txt`)
+
+### Run
+
+```
+uvicorn api:app --reload
+```
+
+### Endpoint
+
+`POST /query`
+
+Request body:
+
+```json
+{
+  "question": "why did halberg retail group churn?",
+  "stage": "in_negotiation",
+  "customer": "Birkenstadt",
+  "top_k": 3
+}
+```
+
+`stage` and `customer` are optional filters (same semantics as the CLI's `--stage`/`--customer`); `top_k` defaults to 3.
+
+Response:
+
+```json
+{
+  "answer": "...",
+  "retrieved": [
+    {
+      "text": "...",
+      "customer": "...",
+      "deal_stage": "...",
+      "score": 0.0123
+    }
+  ]
+}
+```
