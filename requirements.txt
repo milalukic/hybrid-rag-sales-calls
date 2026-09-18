@@ -3,3 +3,7 @@ numpy>=1.24.0
 anthropic>=0.34.0
 fastapi
 uvicorn
+
+pydantic
+anthropic
+rank_bm25
