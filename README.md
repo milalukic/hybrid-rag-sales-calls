@@ -1,5 +1,14 @@
 # Hybrid RAG (Retrieval-Augmented Generation) Sales Calls
 
+# Folder structure
+
+hybrid-rag-sales-calls/
+├── python-service/   
+├── java-gateway/
+
+
+## Python Service
+
 ### Chunking
 Used sliding window overlap to reduce the chance of cutting important piece of information in half across a chunk boundary (overlap - 30, step = chunk_size - overlap)
  
@@ -116,3 +125,70 @@ Response:
   ]
 }
 ```
+
+## Java Gateway
+
+### Running locally
+
+Requires JDK 17+ and Maven. Run from this folder (java-gateway/), with python-service/ already running in another terminal.
+
+```bash
+# from repo root:
+cd java-gateway
+export PYTHON_SERVICE_URL=http://localhost:8000
+export GATEWAY_API_KEY=dev-local-key
+mvn spring-boot:run
+```
+
+Test it:
+
+```bash
+curl -X POST http://localhost:8080/api/query \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: dev-local-key" \
+  -d '{"question": "What objections came up in the Acme deal?", "top_k": 5}'
+```
+
+Health check (no API key needed): `GET /api/health`
+
+## Config (env vars)
+
+| Variable                 | Default                 | Purpose                                   |
+|---------------------------|--------------------------|--------------------------------------------|
+| `PORT`                    | `8080`                   | Port the gateway listens on                |
+| `PYTHON_SERVICE_URL`      | `http://localhost:8000` | Base URL of the deployed Python service    |
+| `PYTHON_SERVICE_TIMEOUT_MS` | `20000`                | Timeout waiting for Python's response      |
+| `GATEWAY_API_KEY`         | `dev-local-key`         | Shared secret Android must send            |
+| `CACHE_TTL_SECONDS`       | `300`                    | How long a cached answer is served         |
+| `CACHE_MAX_SIZE`          | `500`                    | Max number of cached query results         |
+
+## Endpoint contract (matched to the real Day 1 FastAPI service)
+
+**Request** `POST {PYTHON_SERVICE_URL}/query`
+```json
+{"question": "...", "stage": "optional", "customer": "optional", "top_k": 3}
+```
+
+**Response**
+```json
+{
+  "answer": "...",
+  "retrieved": [
+    {"text": "...", "customer": "...", "deal_stage": "...", "score": 0.83}
+  ]
+}
+```
+
+Java fields stay camelCase (`topK`, `dealStage`) internally but are mapped to
+the Python service's snake_case JSON via `@JsonProperty("top_k")` /
+`@JsonProperty("deal_stage")` in `QueryRequest`/`RetrievedChunk`, so no
+manual renaming is needed on either side. `top_k` defaults to `3`, matching
+the Python `Field(default=3, ge=1)`.
+
+## Deploying
+
+Package with `mvn clean package`, run the resulting jar from `target/`, or
+point Render/Fly/Railway at this repo with a Java 17 buildpack. Set
+`PYTHON_SERVICE_URL` to your deployed Python service's public URL and pick a
+real `GATEWAY_API_KEY` (not the dev default) before deploying.
+
