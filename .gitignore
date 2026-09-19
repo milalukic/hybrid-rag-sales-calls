@@ -1,0 +1,7 @@
+python-service/venv/
+python-service/__pycache__/
+python-service/*.pyc
+
+java-gateway/target/
+java-gateway/.mvn/
+
