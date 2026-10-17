@@ -1,0 +1,634 @@
+diff --git a/.gitignore b/.gitignore
+index 6cfb7a5..d61cb6d 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -4,4 +4,4 @@ python-service/*.pyc
+ 
+ java-gateway/target/
+ java-gateway/.mvn/
+-
++python-service/.context_cache.json
+diff --git a/README.md b/README.md
+index 2f1a450..7e57973 100644
+--- a/README.md
++++ b/README.md
+@@ -14,6 +14,18 @@ Used sliding window overlap to reduce the chance of cutting important piece of i
+  
+ Every chunk carries the chunk id, doc id, text, metadata (everything but id/text) - used for hard filters later
+ 
++### Contextual Embeddings
++
++A chunk can lose what made it findable: "the deciding factor was the 12-warehouse sync" never names the customer, so a query like "what convinced Nordwind?" has nothing to match. Before indexing, `contextualize.add_context()` asks Claude (default `claude-haiku-5-5`, override with `CONTEXT_MODEL`) for 1-2 sentences situating each chunk in its full document, and the index is built over `context + text` for **BM25, the embeddings and the cross-encoder**. The original `text` is never modified, so generation still sees the real transcript.
++
++- Stored in a separate `context` field on each chunk; chunks without one index exactly as before.
++- Cached on disk (`.context_cache.json`, keyed on prompt version + model + document + chunk), so restarts and eval runs don't re-bill the API. Bump `PROMPT_VERSION` after editing the prompt.
++- No `ANTHROPIC_API_KEY`, or a failed call: falls back per chunk to a metadata-only context ("Sales call with X on DATE (deal stage: Y)."). Fallbacks are never cached.
++- On by default. Disable with `CONTEXTUAL_EMBEDDINGS=0` or `python3 main.py "..." --no-context`.
++- Measure it: `python3 eval.py --compare-context` prints hit@1 / hit@3 / MRR with vs without context (retrieval only, no generation calls).
++
++Note: the sample calls are all shorter than `chunk_size`, so each is a single chunk and the gain on this data will be small; it matters once transcripts are long enough to split. Reranker scores shift once context is included, so re-check any score thresholds (e.g. abstention) after enabling it.
++
+ ### Dense Retrieval
+ Used all-MiniLM-L6-v2 for embedding - a list of numbers represent what a text means (meaning, the synonyms will have similar numbers) , good for cases for example when someone asks “why did the customer cancel due to cost” and the transcript actually says “the price was too high”, it’s different words, same meaning.
+ 
+diff --git a/python-service/api.py b/python-service/api.py
+index 5dcbf85..71b7df1 100644
+--- a/python-service/api.py
++++ b/python-service/api.py
+@@ -5,8 +5,7 @@ from typing import Any, Dict, List, Optional
+ from fastapi import FastAPI, HTTPException
+ from pydantic import BaseModel, Field
+ 
+-from chunking import chunk_documents
+-from retrieval import HybridIndex
++from retrieval import HybridIndex, build_index
+ from generate import generate_answer
+ 
+ DATA_PATH = "data/sales_calls.json"
+@@ -16,8 +15,7 @@ DATA_PATH = "data/sales_calls.json"
+ async def lifespan(app: FastAPI):
+     with open(DATA_PATH) as f:
+         docs = json.load(f)
+-    chunks = chunk_documents(docs)
+-    app.state.index = HybridIndex(chunks)
++    app.state.index = build_index(docs)
+     yield
+     app.state.index = None
+ 
+diff --git a/python-service/contextualize.py b/python-service/contextualize.py
+new file mode 100644
+index 0000000..9ca6cbd
+--- /dev/null
++++ b/python-service/contextualize.py
+@@ -0,0 +1,179 @@
++"""
++Contextual embeddings (a.k.a. Contextual Retrieval).
++
++Problem: once a document is split into chunks, a chunk can lose the
++information that made it findable. "The deciding factor was the 12-warehouse
++sync" never names the customer, the date, or the deal -- that lives elsewhere
++in the call. A bi-encoder embedding and a BM25 index only see the chunk text,
++so a query like "what convinced Nordwind to buy?" has nothing to match on.
++
++Fix: before indexing, ask an LLM to write 1-2 sentences that situate each
++chunk within its full document, and prepend that to the chunk. The result
++("This chunk is from the Nordwind Logistics closed_won call on 2026-02-14,
++covering the deciding factor in their evaluation. ...") is what gets embedded
++AND what gets BM25-indexed (so both halves of the hybrid benefit).
++
++Design choices:
++  * The ORIGINAL chunk text is never modified. Context is stored in a separate
++    "context" field, so generation and display still show the real transcript.
++  * Results are cached on disk, keyed on (prompt version, model, document,
++    chunk). Restarting uvicorn or re-running eval does not re-bill the API.
++  * Without ANTHROPIC_API_KEY (or if a single call fails) we fall back to a
++    deterministic context built from the chunk's metadata. That is weaker than
++    LLM context but free, offline, and still fixes the "chunk never names the
++    customer" case.
++"""
++
++import hashlib
++import json
++import logging
++import os
++from concurrent.futures import ThreadPoolExecutor
++from pathlib import Path
++from typing import Any, Dict, List, Optional
++
++log = logging.getLogger(__name__)
++
++# Context generation is a cheap, high-volume, low-reasoning task -> small model.
++CONTEXT_MODEL = os.environ.get("CONTEXT_MODEL", "claude-haiku-5-5")
++
++# Bump this to invalidate every cached context after editing the prompt below.
++PROMPT_VERSION = "v1"
++
++CACHE_PATH = Path(
++    os.environ.get("CONTEXT_CACHE_PATH", Path(__file__).parent / ".context_cache.json")
++)
++
++CHUNK_PROMPT = (
++    "Here is the chunk we want to situate within the whole document:\n"
++    "<chunk>\n{chunk}\n</chunk>\n\n"
++    "Write a short, succinct context (1-2 sentences) that situates this chunk "
++    "within the overall document, to improve search retrieval of the chunk. "
++    "Name the customer and say which part of the call the chunk covers. "
++    "Answer with only the context and nothing else."
++)
++
++
++def metadata_context(chunk: Dict[str, Any]) -> str:
++    """Deterministic fallback context built purely from chunk metadata."""
++    meta = chunk.get("metadata", {})
++    customer = meta.get("customer")
++    parts = [f"Sales call with {customer}" if customer else "Sales call"]
++    if meta.get("date"):
++        parts.append(f"on {meta['date']}")
++    if meta.get("deal_stage"):
++        parts.append(f"(deal stage: {meta['deal_stage']})")
++    return " ".join(parts) + "."
++
++
++def contextualized_text(chunk: Dict[str, Any]) -> str:
++    """The text that gets embedded / BM25-indexed: context + original chunk."""
++    ctx = chunk.get("context")
++    return f"{ctx}\n\n{chunk['text']}" if ctx else chunk["text"]
++
++
++def _document_block(doc: Dict[str, Any]) -> str:
++    meta = {k: v for k, v in doc.items() if k not in ("id", "text")}
++    header = ", ".join(f"{k}: {v}" for k, v in meta.items())
++    return f"<document>\n{header}\n\n{doc['text']}\n</document>"
++
++
++def _cache_key(model: str, doc_block: str, chunk_text: str) -> str:
++    raw = f"{PROMPT_VERSION}|{model}|{doc_block}|{chunk_text}"
++    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
++
++
++def _load_cache() -> Dict[str, str]:
++    try:
++        return json.loads(CACHE_PATH.read_text())
++    except (FileNotFoundError, json.JSONDecodeError):
++        return {}
++
++
++def _save_cache(cache: Dict[str, str]) -> None:
++    try:
++        CACHE_PATH.write_text(json.dumps(cache, indent=1))
++    except OSError as e:  # read-only filesystem etc. -- cache is an optimisation only
++        log.warning("could not write context cache: %s", e)
++
++
++def _llm_context(client: Any, doc_block: str, chunk_text: str) -> str:
++    response = client.messages.create(
++        model=CONTEXT_MODEL,
++        max_tokens=150,
++        messages=[{
++            "role": "user",
++            "content": [
++                # The (long) document goes first and is marked cacheable, so when
++                # a document has many chunks the API only pays full price for it
++                # once. (Caching only kicks in above the model's minimum prompt
++                # length, so it's a no-op for the short calls in the sample data.)
++                {"type": "text", "text": doc_block, "cache_control": {"type": "ephemeral"}},
++                {"type": "text", "text": CHUNK_PROMPT.format(chunk=chunk_text)},
++            ],
++        }],
++    )
++    text = "".join(b.text for b in response.content if b.type == "text").strip()
++    if not text:
++        raise ValueError("empty context returned")
++    return text
++
++
++def add_context(
++    chunks: List[Dict[str, Any]],
++    docs: List[Dict[str, Any]],
++    mode: str = "auto",
++    client: Optional[Any] = None,
++    max_workers: int = 8,
++) -> List[Dict[str, Any]]:
++    """
++    Return copies of `chunks`, each with an added "context" string.
++
++    mode:
++      "llm"      -- generate context with Claude (needs ANTHROPIC_API_KEY or `client`)
++      "metadata" -- deterministic context from metadata only; no API calls
++      "auto"     -- "llm" if a key/client is available, else "metadata"
++    """
++    if mode not in ("auto", "llm", "metadata"):
++        raise ValueError(f"unknown mode: {mode!r}")
++
++    if mode == "auto":
++        mode = "llm" if (client is not None or os.environ.get("ANTHROPIC_API_KEY")) else "metadata"
++
++    if mode == "metadata":
++        log.info("contextual embeddings: metadata-only context (no LLM calls)")
++        return [{**c, "context": metadata_context(c)} for c in chunks]
++
++    if client is None:
++        import anthropic
++        client = anthropic.Anthropic()
++
++    docs_by_id = {d["id"]: d for d in docs}
++    cache = _load_cache()
++    stats = {"cached": 0, "generated": 0, "fallback": 0}
++
++    def work(chunk: Dict[str, Any]):
++        doc_block = _document_block(docs_by_id[chunk["doc_id"]])
++        key = _cache_key(CONTEXT_MODEL, doc_block, chunk["text"])
++        if key in cache:
++            return key, cache[key], "cached"
++        try:
++            return key, _llm_context(client, doc_block, chunk["text"]), "generated"
++        except Exception as e:  # one bad call must not take down index building
++            log.warning("context generation failed for %s: %s", chunk["chunk_id"], e)
++            return key, metadata_context(chunk), "fallback"
++
++    with ThreadPoolExecutor(max_workers=max_workers) as pool:
++        results = list(pool.map(work, chunks))
++
++    out = []
++    for chunk, (key, ctx, source) in zip(chunks, results):
++        stats[source] += 1
++        if source == "generated":
++            cache[key] = ctx  # never cache fallbacks, so a retry can upgrade them
++        out.append({**chunk, "context": ctx})
++
++    if stats["generated"]:
++        _save_cache(cache)
++    log.info("contextual embeddings: %s", stats)
++    return out
+diff --git a/python-service/eval.py b/python-service/eval.py
+index cc8ac31..8282192 100644
+--- a/python-service/eval.py
++++ b/python-service/eval.py
+@@ -25,8 +25,7 @@ wrong answers slip through).
+ import os
+ import json
+ from typing import List, Dict, Any
+-from chunking import chunk_documents
+-from retrieval import HybridIndex
++from retrieval import HybridIndex, build_index
+ from generate import generate_answer
+ 
+ # The labeled test set. Each entry pairs a question with what a CORRECT
+@@ -218,9 +217,44 @@ def run_eval(index: HybridIndex, top_k: int = 3, verbose: bool = True) -> Dict[s
+     return summary
+ 
+ 
++def retrieval_metrics(index: HybridIndex, ks=(1, 3)) -> Dict[str, float]:
++    """
++    Retrieval-only scoring (no LLM calls, so it's free and deterministic):
++    hit@k = fraction of questions whose expected doc appears in the top k,
++    MRR   = mean of 1/rank of the first expected doc (0 if absent from top 10).
++    MRR is the more sensitive number when hit@k is already saturated.
++    """
++    hits = {k: 0 for k in ks}
++    rr_total = 0.0
++    for case in TEST_SET:
++        retrieved = index.hybrid_search(case["question"], top_k=10)
++        rank = next(
++            (i + 1 for i, c in enumerate(retrieved) if c["doc_id"] in case["expected_doc_ids"]),
++            None,
++        )
++        for k in ks:
++            hits[k] += int(rank is not None and rank <= k)
++        rr_total += 1.0 / rank if rank else 0.0
++    n = len(TEST_SET)
++    return {**{f"hit@{k}": hits[k] / n for k in ks}, "mrr": rr_total / n}
++
++
++def compare_context(docs: List[Dict[str, Any]]) -> None:
++    """A/B: same docs, same models, with vs without contextual embeddings."""
++    base = retrieval_metrics(build_index(docs, contextual=False))
++    ctx = retrieval_metrics(build_index(docs, contextual=True))
++    print(f"{'metric':<8} {'baseline':>9} {'contextual':>11} {'delta':>8}")
++    for name in base:
++        print(f"{name:<8} {base[name]:>9.3f} {ctx[name]:>11.3f} {ctx[name] - base[name]:>+8.3f}")
++
++
+ if __name__ == "__main__":
++    import sys
++
+     with open("data/sales_calls.json") as f:
+         docs = json.load(f)
+-    chunks = chunk_documents(docs)
+-    index = HybridIndex(chunks)
+-    run_eval(index)
++
++    if "--compare-context" in sys.argv:
++        compare_context(docs)
++    else:
++        run_eval(build_index(docs))
+diff --git a/python-service/main.py b/python-service/main.py
+index afe8324..ca9f797 100644
+--- a/python-service/main.py
++++ b/python-service/main.py
+@@ -2,8 +2,7 @@ import sys
+ import json
+ import argparse
+ 
+-from chunking import chunk_documents
+-from retrieval import HybridIndex
++from retrieval import build_index
+ from generate import generate_answer
+ 	
+ def main():
+@@ -14,16 +13,16 @@ def main():
+ 	parser.add_argument("--stage", type=str, default=None, help="Filter to a deal_stage, e.g. in_negotiation, closed_won, churned")
+ 	parser.add_argument("--customer", type=str, default=None, help="Filter to a specific customer name (partial match, case-insensitive)")
+ 	parser.add_argument("--top_k", type=int, default=3, help="How many chunks to retrieve (default 3)")
++	parser.add_argument("--no-context", action="store_true", help="Disable contextual embeddings (index raw chunk text only)")
+  
+ 	args = parser.parse_args()
+ 
+-	# Step 1: load .json file and split the data into chunks (chunking.py)
++	# Step 1: load .json file
+ 	with open("data/sales_calls.json") as f:
+ 		docs = json.load(f)
+-	chunks = chunk_documents(docs)
+ 
+-	# Step 2: build the search index and retrieve relevant chunks (retrieval.py)
+-	index = HybridIndex(chunks)
++	# Step 2: chunk, add per-chunk context (contextualize.py), build the search index (retrieval.py)
++	index = build_index(docs, contextual=False if args.no_context else None)
+ 	# if the user doesn't ask for a filter every chunk will be a candidate
+ 	metadata_filter = None
+     
+diff --git a/python-service/retrieval.py b/python-service/retrieval.py
+index 0c40458..514b250 100644
+--- a/python-service/retrieval.py
++++ b/python-service/retrieval.py
+@@ -1,17 +1,25 @@
++import os
+ from typing import List, Dict, Any, Optional, Callable
+ import numpy as np
+ from rank_bm25 import BM25Okapi
+ from sentence_transformers import SentenceTransformer, CrossEncoder
+ 
++from contextualize import contextualized_text
++
+ 
+ class HybridIndex:
+-	def __init__(self, chunks: List[Dict[str, Any]], embedding_model: str = "all-MiniLM-L6-v2",  reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"):
++	def __init__(self, chunks: List[Dict[str, Any]], embedding_model: str = "all-MiniLM-L6-v2",  reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2", use_context: bool = True):
+ 		"""
+ 		chunks: output of chunking.chunk_documents() -- a list of{"chunk_id", "doc_id", "text"} dicts.
++		use_context: if True, chunks that carry a "context" field (see contextualize.add_context)
++			are indexed as context + text, for BM25, embeddings AND the reranker. The original
++			"text" is never changed, so generation still sees the real transcript. Chunks with no
++			"context" field are indexed exactly as before.
+ 		"""
+ 
+ 		self.chunks = chunks
+-		self.texts = [c["text"] for c in chunks]
++		self.use_context = use_context
++		self.texts = [self._index_text(c) for c in chunks]
+ 
+ 		# sparse index (BM25) - good at direct word search 
+ 		tokenized = [t.lower().split() for t in self.texts]
+@@ -26,6 +34,10 @@ class HybridIndex:
+ 		# takes query + chunk and combines them at input 
+ 		self.reranker = CrossEncoder(reranker_model)
+ 	
++	def _index_text(self, chunk: Dict[str, Any]) -> str:
++		"""The text a chunk is searched/ranked by (context-prefixed when enabled)."""
++		return contextualized_text(chunk) if self.use_context else chunk["text"]
++
+ 	def _apply_filter(self, metadata_filter: Optional[Callable[[Dict], bool]]) -> List[int]:
+ 		if metadata_filter is None:
+ 			return list(range(len(self.chunks)))
+@@ -54,7 +66,7 @@ class HybridIndex:
+ 			return []
+  
+         	# The CrossEncoder expects a list of (query, passage) PAIRSa nd returns one relevance score per pair in the same order.
+-		pairs = [(query, c["text"]) for c in candidates]
++		pairs = [(query, self._index_text(c)) for c in candidates]
+ 		rerank_scores = self.reranker.predict(pairs)
+  
+         	# Attach each candidate's new cross-encoder score, then sort descending (higher = more relevant) and keep only the final top_k.
+@@ -112,6 +124,26 @@ class HybridIndex:
+ 
+ 
+ 
++def build_index(docs: List[Dict[str, Any]], contextual: Optional[bool] = None, **index_kwargs) -> "HybridIndex":
++	"""
++	One place that turns raw docs into a ready HybridIndex (chunk -> add context -> index),
++	so main.py / api.py / server.py / eval.py can't drift apart.
++
++	contextual: True/False to force it; None reads the CONTEXTUAL_EMBEDDINGS env var
++	(default on; set to "0" to disable).
++	"""
++	from chunking import chunk_documents
++	from contextualize import add_context
++
++	if contextual is None:
++		contextual = os.environ.get("CONTEXTUAL_EMBEDDINGS", "1") != "0"
++
++	chunks = chunk_documents(docs)
++	if contextual:
++		chunks = add_context(chunks, docs)
++	return HybridIndex(chunks, use_context=contextual, **index_kwargs)
++
++
+ 
+ if __name__ == "__main__":
+     import json
+@@ -128,5 +160,3 @@ if __name__ == "__main__":
+     for r in index.hybrid_search(query, top_k=3):
+         print(f"[{r.get('rerank_score', r['score']):.4f}] {r['doc_id']}: {r['text'][:100]}...")
+  
+-
+-
+diff --git a/python-service/server.py b/python-service/server.py
+index 60c3052..cfb33fe 100644
+--- a/python-service/server.py
++++ b/python-service/server.py
+@@ -1,8 +1,7 @@
+ from mcp.server.mcpserver import MCPServer
+ import json
+ 
+-from chunking import chunk_documents
+-from retrieval import HybridIndex
++from retrieval import build_index
+ from generate import generate_answer
+ 
+ mcp = MCPServer("hybrid-rag-sales-calls")
+@@ -11,8 +10,7 @@ mcp = MCPServer("hybrid-rag-sales-calls")
+ # SentenceTransformer + CrossEncoder models is the expensive part.
+ with open("data/sales_calls.json") as f:
+     docs = json.load(f)
+-chunks = chunk_documents(docs)
+-index = HybridIndex(chunks)
++index = build_index(docs)
+ 
+ 
+ @mcp.tool()
+diff --git a/python-service/tests/test_contextualize.py b/python-service/tests/test_contextualize.py
+new file mode 100644
+index 0000000..541c0b5
+--- /dev/null
++++ b/python-service/tests/test_contextualize.py
+@@ -0,0 +1,139 @@
++"""
++Tests for contextualize.py.
++
++These use a fake Anthropic client, so they need no API key, no network, and
++no embedding models.
++
++Run with:
++    python test_contextualize.py
++"""
++
++import contextualize
++from contextualize import add_context, contextualized_text, metadata_context
++from chunking import chunk_documents
++
++DOCS = [
++    {"id": "call_a", "customer": "Acme Corp", "date": "2026-01-05", "deal_stage": "churned",
++     "text": " ".join(f"alpha{i}" for i in range(300))},   # long -> several chunks
++    {"id": "call_b", "customer": "Birk GmbH", "date": "2026-02-01", "deal_stage": "closed_won",
++     "text": "Short call about pricing."},
++]
++
++
++class _Block:
++    type = "text"
++    def __init__(self, text): self.text = text
++
++
++class FakeClient:
++    """Mimics client.messages.create(); records every call."""
++    def __init__(self, fail_on=None):
++        self.calls = []
++        self.fail_on = fail_on
++        self.messages = self
++
++    def create(self, **kwargs):
++        self.calls.append(kwargs)
++        chunk_prompt = kwargs["messages"][0]["content"][1]["text"]
++        if self.fail_on and self.fail_on in chunk_prompt:
++            raise RuntimeError("boom")
++        return type("R", (), {"content": [_Block("  Generated context.  ")]})()
++
++
++def _use_tmp_cache(tmp_path):
++    # Accept either a file path (script mode) or a directory (pytest's tmp_path).
++    contextualize.CACHE_PATH = tmp_path / "cache.json" if tmp_path.is_dir() else tmp_path
++
++
++def test_llm_context_added_and_text_untouched(tmp_path):
++    _use_tmp_cache(tmp_path)
++    chunks = chunk_documents(DOCS)
++    out = add_context(chunks, DOCS, mode="llm", client=FakeClient())
++    assert len(out) == len(chunks)
++    for before, after in zip(chunks, out):
++        assert after["text"] == before["text"], "original chunk text must not change"
++        assert after["context"] == "Generated context.", "context should be stripped"
++        assert "context" not in before, "input chunks must not be mutated"
++    print("PASS: context added, original text and input list untouched")
++
++
++def test_prompt_contains_document_and_is_cacheable(tmp_path):
++    _use_tmp_cache(tmp_path)
++    client = FakeClient()
++    add_context(chunk_documents(DOCS)[:1], DOCS, mode="llm", client=client)
++    content = client.calls[0]["messages"][0]["content"]
++    assert "Acme Corp" in content[0]["text"] and "alpha299" in content[0]["text"], "full doc + metadata expected"
++    assert content[0].get("cache_control") == {"type": "ephemeral"}
++    print("PASS: prompt carries the full document (cacheable) plus the chunk")
++
++
++def test_disk_cache_avoids_second_api_call(tmp_path):
++    _use_tmp_cache(tmp_path)
++    chunks = chunk_documents(DOCS)
++    first = FakeClient()
++    add_context(chunks, DOCS, mode="llm", client=first)
++    assert len(first.calls) == len(chunks)
++
++    second = FakeClient()
++    out = add_context(chunks, DOCS, mode="llm", client=second)
++    assert second.calls == [], "second run should be served entirely from cache"
++    assert all(c["context"] == "Generated context." for c in out)
++    print("PASS: second run makes zero API calls")
++
++
++def test_failed_call_falls_back_and_is_not_cached(tmp_path):
++    _use_tmp_cache(tmp_path)
++    chunks = chunk_documents(DOCS)
++    out = add_context(chunks, DOCS, mode="llm", client=FakeClient(fail_on="Short call"))
++    short = next(c for c in out if c["doc_id"] == "call_b")
++    assert short["context"] == metadata_context(short), "failed call should fall back to metadata context"
++
++    retry = FakeClient()
++    add_context(chunks, DOCS, mode="llm", client=retry)
++    assert len(retry.calls) == 1, "only the previously-failed chunk should be retried"
++    print("PASS: failure falls back per-chunk, and is retried (not cached) next time")
++
++
++def test_auto_mode_without_key_is_offline(tmp_path):
++    _use_tmp_cache(tmp_path)
++    import os
++    saved = os.environ.pop("ANTHROPIC_API_KEY", None)
++    try:
++        out = add_context(chunk_documents(DOCS), DOCS, mode="auto")
++    finally:
++        if saved is not None:
++            os.environ["ANTHROPIC_API_KEY"] = saved
++    assert all(c["context"].startswith("Sales call with") for c in out)
++    print("PASS: no API key -> metadata-only context, no network")
++
++
++def test_metadata_context_is_robust_to_missing_fields():
++    assert metadata_context({"metadata": {}}) == "Sales call."
++    assert metadata_context({}) == "Sales call."
++    c = metadata_context({"metadata": {"customer": "X", "date": "2026-01-01", "deal_stage": "churned"}})
++    assert c == "Sales call with X on 2026-01-01 (deal stage: churned)."
++    print("PASS: metadata_context handles missing fields")
++
++
++def test_contextualized_text():
++    assert contextualized_text({"text": "body"}) == "body"
++    assert contextualized_text({"text": "body", "context": ""}) == "body"
++    assert contextualized_text({"text": "body", "context": "ctx"}) == "ctx\n\nbody"
++    print("PASS: contextualized_text prefixes context only when present")
++
++
++if __name__ == "__main__":
++    import tempfile
++    from pathlib import Path
++
++    def fresh():
++        return Path(tempfile.mkdtemp()) / "cache.json"
++
++    test_llm_context_added_and_text_untouched(fresh())
++    test_prompt_contains_document_and_is_cacheable(fresh())
++    test_disk_cache_avoids_second_api_call(fresh())
++    test_failed_call_falls_back_and_is_not_cached(fresh())
++    test_auto_mode_without_key_is_offline(fresh())
++    test_metadata_context_is_robust_to_missing_fields()
++    test_contextualized_text()
++    print("\nAll contextualize tests passed.")
+diff --git a/python-service/tests/test_retrieval.py b/python-service/tests/test_retrieval.py
+index 912368a..1fa018f 100644
+--- a/python-service/tests/test_retrieval.py
++++ b/python-service/tests/test_retrieval.py
+@@ -97,9 +97,36 @@ def test_reranker_disabled_skips_rerank_score():
+     print("PASS: disabling the reranker correctly falls back to plain RRF results")
+ 
+ 
++def test_context_makes_chunk_findable_by_info_it_does_not_contain():
++    """
++    A chunk that never names its customer should become findable by customer
++    name once it carries a "context" field -- and NOT before (so the test
++    proves the context is what made the difference).
++    """
++    docs = [
++        {"id": "doc_a", "text": "The deciding factor was the real time inventory sync across all warehouses."},
++        {"id": "doc_b", "text": "The deciding factor was the dashboard and reporting features."},
++        {"id": "doc_c", "text": "Pricing was agreed at annual billing paid quarterly."},
++    ]
++    chunks = chunk_documents(docs, chunk_size=120, overlap=30)
++    for c in chunks:
++        if c["doc_id"] == "doc_a":
++            c["context"] = "Call with Quillfeather Logistics (closed_won) about their evaluation."
++
++    query = "what convinced Quillfeather to buy"
++    with_ctx = HybridIndex(chunks, use_context=True).hybrid_search(query, top_k=1)
++    without_ctx = HybridIndex(chunks, use_context=False).hybrid_search(query, top_k=3)
++
++    assert with_ctx[0]["doc_id"] == "doc_a", "context should make doc_a retrievable by customer name"
++    assert with_ctx[0]["text"] == docs[0]["text"], "original text must be preserved for generation"
++    assert not any("Quillfeather" in c["text"] for c in without_ctx), "sanity: raw text never contains the name"
++    print("PASS: contextual index finds a chunk by information that only its context contains")
++
++
+ if __name__ == "__main__":
+     test_bm25_catches_exact_rare_term()
+     test_top_k_is_respected()
+     test_reranker_adds_rerank_score_when_enabled()
+     test_reranker_disabled_skips_rerank_score()
++    test_context_makes_chunk_findable_by_info_it_does_not_contain()
+     print("\nAll retrieval tests passed.")

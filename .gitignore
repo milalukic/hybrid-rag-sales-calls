@@ -4,4 +4,4 @@ python-service/*.pyc
 
 java-gateway/target/
 java-gateway/.mvn/
-
+python-service/.context_cache.json

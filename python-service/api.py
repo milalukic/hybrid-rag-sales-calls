@@ -5,8 +5,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from chunking import chunk_documents
-from retrieval import HybridIndex
+from retrieval import HybridIndex, build_index
 from generate import generate_answer
 
 DATA_PATH = "data/sales_calls.json"
@@ -16,8 +15,7 @@ DATA_PATH = "data/sales_calls.json"
 async def lifespan(app: FastAPI):
     with open(DATA_PATH) as f:
         docs = json.load(f)
-    chunks = chunk_documents(docs)
-    app.state.index = HybridIndex(chunks)
+    app.state.index = build_index(docs)
     yield
     app.state.index = None
 

@@ -1,8 +1,7 @@
 from mcp.server.mcpserver import MCPServer
 import json
 
-from chunking import chunk_documents
-from retrieval import HybridIndex
+from retrieval import build_index
 from generate import generate_answer
 
 mcp = MCPServer("hybrid-rag-sales-calls")
@@ -11,8 +10,7 @@ mcp = MCPServer("hybrid-rag-sales-calls")
 # SentenceTransformer + CrossEncoder models is the expensive part.
 with open("data/sales_calls.json") as f:
     docs = json.load(f)
-chunks = chunk_documents(docs)
-index = HybridIndex(chunks)
+index = build_index(docs)
 
 
 @mcp.tool()

@@ -2,8 +2,7 @@ import sys
 import json
 import argparse
 
-from chunking import chunk_documents
-from retrieval import HybridIndex
+from retrieval import build_index
 from generate import generate_answer
 	
 def main():
@@ -14,16 +13,16 @@ def main():
 	parser.add_argument("--stage", type=str, default=None, help="Filter to a deal_stage, e.g. in_negotiation, closed_won, churned")
 	parser.add_argument("--customer", type=str, default=None, help="Filter to a specific customer name (partial match, case-insensitive)")
 	parser.add_argument("--top_k", type=int, default=3, help="How many chunks to retrieve (default 3)")
+	parser.add_argument("--no-context", action="store_true", help="Disable contextual embeddings (index raw chunk text only)")
  
 	args = parser.parse_args()
 
-	# Step 1: load .json file and split the data into chunks (chunking.py)
+	# Step 1: load .json file
 	with open("data/sales_calls.json") as f:
 		docs = json.load(f)
-	chunks = chunk_documents(docs)
 
-	# Step 2: build the search index and retrieve relevant chunks (retrieval.py)
-	index = HybridIndex(chunks)
+	# Step 2: chunk, add per-chunk context (contextualize.py), build the search index (retrieval.py)
+	index = build_index(docs, contextual=False if args.no_context else None)
 	# if the user doesn't ask for a filter every chunk will be a candidate
 	metadata_filter = None
     

@@ -1,17 +1,25 @@
+import os
 from typing import List, Dict, Any, Optional, Callable
 import numpy as np
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer, CrossEncoder
 
+from contextualize import contextualized_text
+
 
 class HybridIndex:
-	def __init__(self, chunks: List[Dict[str, Any]], embedding_model: str = "all-MiniLM-L6-v2",  reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"):
+	def __init__(self, chunks: List[Dict[str, Any]], embedding_model: str = "all-MiniLM-L6-v2",  reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2", use_context: bool = True):
 		"""
 		chunks: output of chunking.chunk_documents() -- a list of{"chunk_id", "doc_id", "text"} dicts.
+		use_context: if True, chunks that carry a "context" field (see contextualize.add_context)
+			are indexed as context + text, for BM25, embeddings AND the reranker. The original
+			"text" is never changed, so generation still sees the real transcript. Chunks with no
+			"context" field are indexed exactly as before.
 		"""
 
 		self.chunks = chunks
-		self.texts = [c["text"] for c in chunks]
+		self.use_context = use_context
+		self.texts = [self._index_text(c) for c in chunks]
 
 		# sparse index (BM25) - good at direct word search 
 		tokenized = [t.lower().split() for t in self.texts]
@@ -26,6 +34,10 @@ class HybridIndex:
 		# takes query + chunk and combines them at input 
 		self.reranker = CrossEncoder(reranker_model)
 	
+	def _index_text(self, chunk: Dict[str, Any]) -> str:
+		"""The text a chunk is searched/ranked by (context-prefixed when enabled)."""
+		return contextualized_text(chunk) if self.use_context else chunk["text"]
+
 	def _apply_filter(self, metadata_filter: Optional[Callable[[Dict], bool]]) -> List[int]:
 		if metadata_filter is None:
 			return list(range(len(self.chunks)))
@@ -54,7 +66,7 @@ class HybridIndex:
 			return []
  
         	# The CrossEncoder expects a list of (query, passage) PAIRSa nd returns one relevance score per pair in the same order.
-		pairs = [(query, c["text"]) for c in candidates]
+		pairs = [(query, self._index_text(c)) for c in candidates]
 		rerank_scores = self.reranker.predict(pairs)
  
         	# Attach each candidate's new cross-encoder score, then sort descending (higher = more relevant) and keep only the final top_k.
@@ -112,6 +124,26 @@ class HybridIndex:
 
 
 
+def build_index(docs: List[Dict[str, Any]], contextual: Optional[bool] = None, **index_kwargs) -> "HybridIndex":
+	"""
+	One place that turns raw docs into a ready HybridIndex (chunk -> add context -> index),
+	so main.py / api.py / server.py / eval.py can't drift apart.
+
+	contextual: True/False to force it; None reads the CONTEXTUAL_EMBEDDINGS env var
+	(default on; set to "0" to disable).
+	"""
+	from chunking import chunk_documents
+	from contextualize import add_context
+
+	if contextual is None:
+		contextual = os.environ.get("CONTEXTUAL_EMBEDDINGS", "1") != "0"
+
+	chunks = chunk_documents(docs)
+	if contextual:
+		chunks = add_context(chunks, docs)
+	return HybridIndex(chunks, use_context=contextual, **index_kwargs)
+
+
 
 if __name__ == "__main__":
     import json
@@ -128,5 +160,3 @@ if __name__ == "__main__":
     for r in index.hybrid_search(query, top_k=3):
         print(f"[{r.get('rerank_score', r['score']):.4f}] {r['doc_id']}: {r['text'][:100]}...")
  
-
-

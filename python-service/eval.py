@@ -25,8 +25,7 @@ wrong answers slip through).
 import os
 import json
 from typing import List, Dict, Any
-from chunking import chunk_documents
-from retrieval import HybridIndex
+from retrieval import HybridIndex, build_index
 from generate import generate_answer
 
 # The labeled test set. Each entry pairs a question with what a CORRECT
@@ -218,9 +217,44 @@ def run_eval(index: HybridIndex, top_k: int = 3, verbose: bool = True) -> Dict[s
     return summary
 
 
+def retrieval_metrics(index: HybridIndex, ks=(1, 3)) -> Dict[str, float]:
+    """
+    Retrieval-only scoring (no LLM calls, so it's free and deterministic):
+    hit@k = fraction of questions whose expected doc appears in the top k,
+    MRR   = mean of 1/rank of the first expected doc (0 if absent from top 10).
+    MRR is the more sensitive number when hit@k is already saturated.
+    """
+    hits = {k: 0 for k in ks}
+    rr_total = 0.0
+    for case in TEST_SET:
+        retrieved = index.hybrid_search(case["question"], top_k=10)
+        rank = next(
+            (i + 1 for i, c in enumerate(retrieved) if c["doc_id"] in case["expected_doc_ids"]),
+            None,
+        )
+        for k in ks:
+            hits[k] += int(rank is not None and rank <= k)
+        rr_total += 1.0 / rank if rank else 0.0
+    n = len(TEST_SET)
+    return {**{f"hit@{k}": hits[k] / n for k in ks}, "mrr": rr_total / n}
+
+
+def compare_context(docs: List[Dict[str, Any]]) -> None:
+    """A/B: same docs, same models, with vs without contextual embeddings."""
+    base = retrieval_metrics(build_index(docs, contextual=False))
+    ctx = retrieval_metrics(build_index(docs, contextual=True))
+    print(f"{'metric':<8} {'baseline':>9} {'contextual':>11} {'delta':>8}")
+    for name in base:
+        print(f"{name:<8} {base[name]:>9.3f} {ctx[name]:>11.3f} {ctx[name] - base[name]:>+8.3f}")
+
+
 if __name__ == "__main__":
+    import sys
+
     with open("data/sales_calls.json") as f:
         docs = json.load(f)
-    chunks = chunk_documents(docs)
-    index = HybridIndex(chunks)
-    run_eval(index)
+
+    if "--compare-context" in sys.argv:
+        compare_context(docs)
+    else:
+        run_eval(build_index(docs))

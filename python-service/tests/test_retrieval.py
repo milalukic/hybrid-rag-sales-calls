@@ -97,9 +97,36 @@ def test_reranker_disabled_skips_rerank_score():
     print("PASS: disabling the reranker correctly falls back to plain RRF results")
 
 
+def test_context_makes_chunk_findable_by_info_it_does_not_contain():
+    """
+    A chunk that never names its customer should become findable by customer
+    name once it carries a "context" field -- and NOT before (so the test
+    proves the context is what made the difference).
+    """
+    docs = [
+        {"id": "doc_a", "text": "The deciding factor was the real time inventory sync across all warehouses."},
+        {"id": "doc_b", "text": "The deciding factor was the dashboard and reporting features."},
+        {"id": "doc_c", "text": "Pricing was agreed at annual billing paid quarterly."},
+    ]
+    chunks = chunk_documents(docs, chunk_size=120, overlap=30)
+    for c in chunks:
+        if c["doc_id"] == "doc_a":
+            c["context"] = "Call with Quillfeather Logistics (closed_won) about their evaluation."
+
+    query = "what convinced Quillfeather to buy"
+    with_ctx = HybridIndex(chunks, use_context=True).hybrid_search(query, top_k=1)
+    without_ctx = HybridIndex(chunks, use_context=False).hybrid_search(query, top_k=3)
+
+    assert with_ctx[0]["doc_id"] == "doc_a", "context should make doc_a retrievable by customer name"
+    assert with_ctx[0]["text"] == docs[0]["text"], "original text must be preserved for generation"
+    assert not any("Quillfeather" in c["text"] for c in without_ctx), "sanity: raw text never contains the name"
+    print("PASS: contextual index finds a chunk by information that only its context contains")
+
+
 if __name__ == "__main__":
     test_bm25_catches_exact_rare_term()
     test_top_k_is_respected()
     test_reranker_adds_rerank_score_when_enabled()
     test_reranker_disabled_skips_rerank_score()
+    test_context_makes_chunk_findable_by_info_it_does_not_contain()
     print("\nAll retrieval tests passed.")

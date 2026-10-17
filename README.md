@@ -14,6 +14,18 @@ Used sliding window overlap to reduce the chance of cutting important piece of i
  
 Every chunk carries the chunk id, doc id, text, metadata (everything but id/text) - used for hard filters later
 
+### Contextual Embeddings
+
+A chunk can lose what made it findable: "the deciding factor was the 12-warehouse sync" never names the customer, so a query like "what convinced Nordwind?" has nothing to match. Before indexing, `contextualize.add_context()` asks Claude (default `claude-haiku-5-5`, override with `CONTEXT_MODEL`) for 1-2 sentences situating each chunk in its full document, and the index is built over `context + text` for **BM25, the embeddings and the cross-encoder**. The original `text` is never modified, so generation still sees the real transcript.
+
+- Stored in a separate `context` field on each chunk; chunks without one index exactly as before.
+- Cached on disk (`.context_cache.json`, keyed on prompt version + model + document + chunk), so restarts and eval runs don't re-bill the API. Bump `PROMPT_VERSION` after editing the prompt.
+- No `ANTHROPIC_API_KEY`, or a failed call: falls back per chunk to a metadata-only context ("Sales call with X on DATE (deal stage: Y)."). Fallbacks are never cached.
+- On by default. Disable with `CONTEXTUAL_EMBEDDINGS=0` or `python3 main.py "..." --no-context`.
+- Measure it: `python3 eval.py --compare-context` prints hit@1 / hit@3 / MRR with vs without context (retrieval only, no generation calls).
+
+Note: the sample calls are all shorter than `chunk_size`, so each is a single chunk and the gain on this data will be small; it matters once transcripts are long enough to split. Reranker scores shift once context is included, so re-check any score thresholds (e.g. abstention) after enabling it.
+
 ### Dense Retrieval
 Used all-MiniLM-L6-v2 for embedding - a list of numbers represent what a text means (meaning, the synonyms will have similar numbers) , good for cases for example when someone asks “why did the customer cancel due to cost” and the transcript actually says “the price was too high”, it’s different words, same meaning.
 
